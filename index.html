@@ -6905,4 +6905,587 @@ const walkShowBase=showWhere;showWhere=function(index=null){if(!activeCase)retur
 const walkStartBase=startCase;startCase=function(...args){const r=walkStartBase.apply(this,args);if(activeCase&&document.querySelector("#frame-portal"))switchTool("portal");return r;};
 
 bootPracticeStudio();
-</script></body></html>
+</script>
+<!-- ARI contextual tutor · local demo, no remote model -->
+<script>
+/* AM Arena expressive robot — self-contained WebGL renderer, no external assets. */
+(function (global) {
+  'use strict';
+  const STATES = new Set(['idle', 'listening', 'thinking', 'speaking']);
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const identity = () => new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);
+  function multiply(a,b) {
+    const out = new Float32Array(16);
+    for(let col=0;col<4;col++) for(let row=0;row<4;row++) {
+      let n=0; for(let k=0;k<4;k++) n += a[k*4+row]*b[col*4+k];
+      out[col*4+row]=n;
+    }
+    return out;
+  }
+  function translation(x=0,y=0,z=0) { const m=identity();m[12]=x;m[13]=y;m[14]=z;return m; }
+  function scaling(x=1,y=x,z=x) { const m=identity();m[0]=x;m[5]=y;m[10]=z;return m; }
+  function rotation(axis,angle) {
+    const m=identity(),c=Math.cos(angle),s=Math.sin(angle);
+    if(axis==='x'){m[5]=c;m[6]=s;m[9]=-s;m[10]=c;}
+    if(axis==='y'){m[0]=c;m[2]=-s;m[8]=s;m[10]=c;}
+    if(axis==='z'){m[0]=c;m[1]=s;m[4]=-s;m[5]=c;}
+    return m;
+  }
+  function transform(parent,position,angles,scale) {
+    let m=position?multiply(parent,translation(...position)):parent;
+    if(angles) { if(angles[1])m=multiply(m,rotation('y',angles[1]));if(angles[0])m=multiply(m,rotation('x',angles[0]));if(angles[2])m=multiply(m,rotation('z',angles[2])); }
+    return scale?multiply(m,scaling(...scale)):m;
+  }
+  function perspective(fov,aspect,near,far) {
+    const f=1/Math.tan(fov/2),n=1/(near-far);
+    return new Float32Array([f/aspect,0,0,0,0,f,0,0,0,0,(far+near)*n,-1,0,0,2*far*near*n,0]);
+  }
+  function normalMatrix(m) {
+    const a=m[0],b=m[4],c=m[8],d=m[1],e=m[5],f=m[9],g=m[2],h=m[6],i=m[10];
+    const A=e*i-f*h,B=f*g-d*i,C=d*h-e*g;
+    const det=a*A+b*B+c*C,inv=Math.abs(det)>1e-10?1/det:0;
+    // Columns of the inverse transpose, suitable for WebGL's column-major uniforms.
+    return new Float32Array([A*inv,(c*h-b*i)*inv,(b*f-c*e)*inv,B*inv,(a*i-c*g)*inv,(c*d-a*f)*inv,C*inv,(b*g-a*h)*inv,(a*e-b*d)*inv]);
+  }
+  function normalize(v) {const k=Math.hypot(...v)||1;return v.map(x=>x/k);}
+  function roundedBox(w,h,d,r,segments=10) {
+    const out=[],half=[w/2,h/2,d/2],radii=half.map(x=>Math.min(x,r)),inner=half.map((x,k)=>Math.max(0,x-radii[k]));
+    function vertex(p) {
+      const q=p.map((v,k)=>clamp(v,-inner[k],inner[k]));
+      const unit=normalize(p.map((v,k)=>(v-q[k])/(radii[k]||1)));
+      const normal=normalize(unit.map((v,k)=>v/(radii[k]||1)));
+      out.push(q[0]+unit[0]*radii[0],q[1]+unit[1]*radii[1],q[2]+unit[2]*radii[2],...normal,1);
+    }
+    for(let axis=0;axis<3;axis++) for(const sign of [-1,1]) {
+      const u=(axis+1)%3,v=(axis+2)%3;
+      function at(i,j){const p=[0,0,0];p[axis]=half[axis]*sign;p[u]=(i/segments*2-1)*half[u];p[v]=(j/segments*2-1)*half[v];return p;}
+      for(let i=0;i<segments;i++)for(let j=0;j<segments;j++) {
+        const a=at(i,j),b=at(i+1,j),c=at(i+1,j+1),e=at(i,j+1);
+        if(sign>0){vertex(a);vertex(b);vertex(c);vertex(a);vertex(c);vertex(e);}
+        else{vertex(a);vertex(c);vertex(b);vertex(a);vertex(e);vertex(c);}
+      }
+    }
+    return out;
+  }
+  function sphere(longitudes=24,latitudes=16) {
+    const out=[];
+    function v(i,j){const theta=i/longitudes*Math.PI*2,phi=j/latitudes*Math.PI;const p=[Math.sin(phi)*Math.cos(theta),Math.cos(phi),Math.sin(phi)*Math.sin(theta)];out.push(...p,...p,1);}
+    for(let j=0;j<latitudes;j++)for(let i=0;i<longitudes;i++){v(i,j);v(i,j+1);v(i+1,j+1);v(i,j);v(i+1,j+1);v(i+1,j);}
+    return out;
+  }
+  function cylinder(segments=32) {
+    const out=[];
+    function v(angle,y,normal) {const x=Math.cos(angle),z=Math.sin(angle);out.push(x,y,z,...(normal||[x,0,z]),1);}
+    for(let i=0;i<segments;i++){
+      const a=i/segments*Math.PI*2,b=(i+1)/segments*Math.PI*2;
+      v(a,-.5);v(a,.5);v(b,.5);v(a,-.5);v(b,.5);v(b,-.5);
+      out.push(0,.5,0,0,1,0,1);v(b,.5,[0,1,0]);v(a,.5,[0,1,0]);
+      out.push(0,-.5,0,0,-1,0,1);v(a,-.5,[0,-1,0]);v(b,-.5,[0,-1,0]);
+    }
+    return out;
+  }
+  function shadow(segments=64) {
+    const out=[];
+    for(let i=0;i<segments;i++){
+      const a=i/segments*2*Math.PI,b=(i+1)/segments*2*Math.PI;
+      out.push(0,0,0,0,1,0,1,Math.cos(a),0,Math.sin(a),0,1,0,0,Math.cos(b),0,Math.sin(b),0,1,0,0);
+    }
+    return out;
+  }
+  function create(canvas) {
+    let state='idle',motion=true,destroyed=false,frame=0,lost=false,offscreen=false;
+    const media=global.matchMedia?global.matchMedia('(prefers-reduced-motion: reduce)'):null;
+    let reduced=!!media?.matches;
+    const started=performance.now();
+    let gl=null;
+    try { gl=canvas.getContext('webgl',{alpha:true,antialias:true,premultipliedAlpha:false,preserveDrawingBuffer:false,powerPreference:'low-power'}); }catch(error){}
+    let api,drawFrame,dispose=()=>{},resizeImpl=()=>{};
+    let observer=null,intersection=null;
+    const active=()=>!destroyed&&!lost&&!offscreen&&!document.hidden;
+    function cancel(){if(frame)cancelAnimationFrame(frame);frame=0;}
+    function schedule(){if(!frame&&active())frame=requestAnimationFrame(tick);}
+    function tick(now){frame=0;if(!active())return;drawFrame?.((now-started)/1000);if(motion&&!reduced)schedule();}
+    function resize(){if(destroyed)return;resizeImpl();schedule();}
+    function onVisibility(){if(document.hidden)cancel();else schedule();}
+    function onMedia(e){reduced=e.matches;cancel();schedule();}
+    function onLost(event){event.preventDefault();lost=true;cancel();}
+    function onRestored(){if(destroyed)return;lost=false;try{dispose();initializeWebGL();resize();}catch(error){lost=true;}}
+    function fallback(){
+      let ctx=null;try{ctx=canvas.getContext('2d');}catch(error){}
+      // A browser that allocated a failed WebGL context cannot switch its canvas to 2D.
+      if(!ctx){canvas.setAttribute('aria-label','AM Arena robot: 3D unavailable');return;}
+      resizeImpl=()=>{const r=canvas.getBoundingClientRect(),dpr=Math.min(2,global.devicePixelRatio||1);canvas.width=Math.max(1,Math.round((r.width||220)*dpr));canvas.height=Math.max(1,Math.round((r.height||240)*dpr));};
+      drawFrame=(time)=>{
+        const w=canvas.width,h=canvas.height,scale=Math.min(w/220,h/240),x=w/2,y=h/2;
+        ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(x,y);ctx.scale(scale,scale);
+        const bob=motion&&!reduced?Math.sin(time*1.7)*3:0;ctx.translate(0,bob);
+        const round=(x,y,w,h,r,color)=>{ctx.fillStyle=color;ctx.beginPath();if(ctx.roundRect)ctx.roundRect(x,y,w,h,r);else ctx.rect(x,y,w,h);ctx.fill();};
+        round(-38,21,76,65,20,'#dce4e9');round(-64,-70,128,97,26,'#f9fbfc');round(-53,-59,106,72,20,'#15202a');
+        round(-30,-37,12,18,6,'#ff684f');round(18,-37,12,18,6,'#ff684f');
+        ctx.strokeStyle='#ff8c79';ctx.lineWidth=3;ctx.beginPath();ctx.arc(0,-18,13,.2,Math.PI-.2);ctx.stroke();
+        round(-3,-88,6,18,3,'#b8c2cb');ctx.fillStyle=state==='listening'?'#52d8ba':'#ff684f';ctx.beginPath();ctx.arc(0,-92,7,0,Math.PI*2);ctx.fill();
+        round(-15,43,30,10,5,'#f15a43');round(-62,28,17,44,8,'#dce4e9');round(45,28,17,44,8,'#dce4e9');ctx.restore();
+      };
+    }
+    function initializeWebGL(){
+      const vertexSource=`attribute vec3 aPosition;attribute vec3 aNormal;attribute float aAlpha;uniform mat4 uProjection;uniform mat4 uView;uniform mat4 uModel;uniform mat3 uNormal;varying vec3 vNormal;varying vec3 vWorld;varying float vAlpha;void main(){vec4 world=uModel*vec4(aPosition,1.0);vWorld=world.xyz;vNormal=normalize(uNormal*aNormal);vAlpha=aAlpha;gl_Position=uProjection*uView*world;}`;
+      const fragmentSource=`precision mediump float;uniform vec4 uColor;uniform vec3 uEye;uniform float uGlow;uniform float uFlat;varying vec3 vNormal;varying vec3 vWorld;varying float vAlpha;void main(){vec3 n=normalize(vNormal);vec3 light=normalize(vec3(-0.55,0.95,1.3));vec3 view=normalize(uEye-vWorld);float diffuse=max(dot(n,light),0.0);float fill=max(dot(n,normalize(vec3(0.9,0.2,0.35))),0.0);vec3 halfV=normalize(light+view);float spec=pow(max(dot(n,halfV),0.0),44.0)*0.20;float rim=pow(1.0-max(dot(n,view),0.0),3.0)*0.07;vec3 lit=uColor.rgb*(0.54+diffuse*0.43+fill*0.12)+vec3(spec+rim);lit=mix(lit,uColor.rgb,uFlat);lit=mix(lit,uColor.rgb*1.05,uGlow);gl_FragColor=vec4(lit,uColor.a*vAlpha);}`;
+      function compile(type,source){const shader=gl.createShader(type);gl.shaderSource(shader,source);gl.compileShader(shader);if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)){const error=gl.getShaderInfoLog(shader);gl.deleteShader(shader);throw Error(error);}return shader;}
+      const vs=compile(gl.VERTEX_SHADER,vertexSource),fs=compile(gl.FRAGMENT_SHADER,fragmentSource),program=gl.createProgram();
+      gl.attachShader(program,vs);gl.attachShader(program,fs);gl.linkProgram(program);gl.deleteShader(vs);gl.deleteShader(fs);
+      if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
+      const attr={position:gl.getAttribLocation(program,'aPosition'),normal:gl.getAttribLocation(program,'aNormal'),alpha:gl.getAttribLocation(program,'aAlpha')};
+      const uniform={};for(const name of ['Projection','View','Model','Normal','Color','Eye','Glow','Flat'])uniform[name]=gl.getUniformLocation(program,'u'+name);
+      const meshes={};
+      function mesh(name,data){const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(data),gl.STATIC_DRAW);meshes[name]={buffer,count:data.length/7};}
+      mesh('head',roundedBox(1.94,1.42,1.10,.29,12));mesh('face',roundedBox(1.64,1.06,.14,.25,12));
+      mesh('body',roundedBox(1.28,.98,.76,.24,10));mesh('belly',roundedBox(.74,.40,.08,.13,8));
+      mesh('arm',roundedBox(.27,.52,.30,.12,7));mesh('hand',roundedBox(.34,.35,.36,.14,8));
+      mesh('foot',roundedBox(.48,.22,.59,.10,7));mesh('eye',roundedBox(.16,.25,.072,.068,8));
+      mesh('bar',roundedBox(.045,.10,.04,.019,6));mesh('badge',roundedBox(.40,.075,.045,.034,7));
+      mesh('sphere',sphere());mesh('cylinder',cylinder());mesh('shadow',shadow());
+      const C={white:[.94,.965,.98,1],body:[.88,.92,.94,1],edge:[.69,.75,.79,1],dark:[.045,.075,.095,1],face:[.025,.045,.060,1],coral:[1,.32,.23,1],pink:[1,.53,.43,1],mint:[.30,.86,.73,1],seam:[.28,.34,.39,1]};
+      let view,projection,eye;
+      let smoothTilt=0,smoothYaw=-.14,smoothArm=.20;
+      function draw(name,model,color,glow=0,flat=0){const m=meshes[name];gl.bindBuffer(gl.ARRAY_BUFFER,m.buffer);gl.vertexAttribPointer(attr.position,3,gl.FLOAT,false,28,0);gl.vertexAttribPointer(attr.normal,3,gl.FLOAT,false,28,12);gl.vertexAttribPointer(attr.alpha,1,gl.FLOAT,false,28,24);gl.uniformMatrix4fv(uniform.Model,false,model);gl.uniformMatrix3fv(uniform.Normal,false,normalMatrix(model));gl.uniform4fv(uniform.Color,color);gl.uniform1f(uniform.Glow,glow);gl.uniform1f(uniform.Flat,flat);gl.drawArrays(gl.TRIANGLES,0,m.count);}
+      resizeImpl=()=>{
+        const r=canvas.getBoundingClientRect(),dpr=Math.min(2,global.devicePixelRatio||1),w=r.width||220,h=r.height||240;
+        const pw=Math.max(1,Math.round(w*dpr)),ph=Math.max(1,Math.round(h*dpr));if(canvas.width!==pw)canvas.width=pw;if(canvas.height!==ph)canvas.height=ph;
+        gl.viewport(0,0,pw,ph);const distance=Math.max(6.5,4.45/(w/h));eye=[0,.05,distance];view=translation(-eye[0],-eye[1],-eye[2]);projection=perspective(35*Math.PI/180,w/h,.1,40);
+      };
+      drawFrame=(seconds)=>{
+        if(lost||destroyed)return;
+        const moving=motion&&!reduced,t=moving?seconds:0,listening=state==='listening',thinking=state==='thinking',speaking=state==='speaking';
+        gl.useProgram(program);gl.enable(gl.DEPTH_TEST);gl.disable(gl.CULL_FACE);gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+        gl.enableVertexAttribArray(attr.position);gl.enableVertexAttribArray(attr.normal);gl.enableVertexAttribArray(attr.alpha);
+        gl.uniformMatrix4fv(uniform.Projection,false,projection);gl.uniformMatrix4fv(uniform.View,false,view);gl.uniform3fv(uniform.Eye,eye);
+        const bob=moving?Math.sin(t*1.7)*.055:0;
+        gl.depthMask(false);draw('shadow',transform(identity(),[0,-1.72,-.05],[.0,0,0],[1.05,1,.56]),[.08,.12,.15,.20],0,1);gl.depthMask(true);
+        const root=transform(identity(),[0,bob,0],[0,-.17+(moving?Math.sin(t*.55)*.06:0),0]);
+        // Soft technical details remain visible from every angle: this is mesh geometry, not a flat sprite.
+        draw('body',transform(root,[0,-.68,0]),C.body);
+        draw('belly',transform(root,[0,-.69,.393]),[.965,.98,.99,1]);
+        draw('badge',transform(root,[0,-.67,.449]),C.coral,.18);
+        draw('sphere',transform(root,[.43,-.97,.31],null,[.035,.035,.035]),C.edge);
+        draw('sphere',transform(root,[-.43,-.97,.31],null,[.035,.035,.035]),C.edge);
+        draw('cylinder',transform(root,[0,-.085,0],null,[.20,.27,.20]),C.seam);
+        for(const side of [-1,1]){
+          draw('cylinder',transform(root,[side*.32,-1.30,-.005],null,[.12,.36,.12]),C.seam);
+          draw('foot',transform(root,[side*.32,-1.51,.085]),C.white);
+          draw('badge',transform(root,[side*.32,-1.50,.388],null,[.67,.58,.70]),C.coral);
+        }
+        const armGoal=listening?1.97:speaking?.65:thinking?.50:.20;
+        smoothArm+=(armGoal-smoothArm)*(moving?.09:1);
+        for(const side of [-1,1]){
+          let angle=side*.20;
+          if(side===1)angle=smoothArm+(speaking&&moving?Math.sin(t*4)*.18:0);
+          if(side===-1&&thinking)angle=-.42;
+          const arm=transform(root,[side*.78,-.38,0],[0,0,angle]);
+          draw('sphere',transform(arm,[0,0,0],null,[.18,.18,.18]),C.coral);
+          draw('arm',transform(arm,[0,-.28,0]),C.white);
+          draw('sphere',transform(arm,[0,-.55,0],null,[.11,.11,.11]),C.seam);
+          draw('hand',transform(arm,[0,-.71,.015],[.08,0,0]),C.white);
+          draw('sphere',transform(arm,[0,-.69,.19],null,[.060,.075,.025]),C.coral);
+        }
+        const tiltGoal=listening?-.10:thinking?.13:speaking?(moving?Math.sin(t*3)*.035:0):Math.sin(t*.8)*.025;
+        const yawGoal=thinking?.17:listening?-.03:Math.sin(t*.7)*.075;
+        smoothTilt+=(tiltGoal-smoothTilt)*(moving?.10:1);smoothYaw+=(yawGoal-smoothYaw)*(moving?.08:1);
+        const head=transform(root,[0,.70,0],[listening?-.045:0,smoothYaw,smoothTilt]);
+        for(const side of [-1,1]){
+          draw('cylinder',transform(head,[side*.98,0,.015],[0,0,Math.PI/2],[.26,.16,.26]),C.edge);
+          draw('cylinder',transform(head,[side*1.07,0,.015],[0,0,Math.PI/2],[.19,.05,.19]),C.coral);
+        }
+        draw('head',head,C.white);draw('face',transform(head,[0,0,.555]),C.face);
+        draw('cylinder',transform(head,[0,.85,-.06],null,[.035,.29,.035]),C.edge);
+        const antennaColor=listening?C.mint:C.coral;
+        const pulse=thinking&&moving?1+Math.sin(t*5)*.13:1;
+        draw('sphere',transform(head,[0,1.035,-.06],null,[.105*pulse,.105*pulse,.105*pulse]),antennaColor,.65);
+        // A short, occasional blink. Motion reduction leaves a clear, static expression.
+        const blinkPhase=(seconds+2.6)%5.4,blink=moving&&blinkPhase<.14?Math.max(.08,Math.abs(blinkPhase-.07)/.07):1;
+        const eyeH=(thinking?.75:listening?1.15:1)*blink,eyeColor=listening?C.mint:C.coral;
+        const glance=thinking&&moving?Math.sin(t*1.5)*.035:0;
+        for(const side of [-1,1]){
+          draw('eye',transform(head,[side*.355+glance,.11,.654],null,[1,eyeH,1]),eyeColor,.8);
+          if(blink>.65)draw('sphere',transform(head,[side*.355-.020+glance,.16,.697],null,[.018,.027,.011]),[1,.93,.89,1],.9);
+          draw('sphere',transform(head,[side*.58,-.15,.655],null,[.068,.028,.014]),[.30,.12,.13,1],.3);
+        }
+        if(thinking){
+          for(let i=0;i<3;i++){const k=moving?.65+.35*Math.sin(t*5-i*1.0):.8;draw('sphere',transform(head,[(i-1)*.13,-.25,.665],null,[.027,.027,.018]),[eyeColor[0]*k,eyeColor[1]*k,eyeColor[2]*k,1],.6);}
+        }else if(listening){
+          draw('sphere',transform(head,[0,-.24,.67],null,[.060,.065,.025]),C.mint,.7);
+        }else{
+          for(let i=0;i<7;i++){
+            const x=(i-3)*.057;
+            if(speaking){const height=moving?.32+Math.abs(Math.sin(t*11+i*.79))*1.10:.85;draw('bar',transform(head,[x,-.245,.674],null,[.76,height,1]),C.pink,.75);}
+            else{const curve=.085*Math.pow(x/.17,2);draw('bar',transform(head,[x,-.265+curve,.674],[0,0,-x*2.5],[.78,.32,1]),C.pink,.7);}
+          }
+        }
+      };
+      dispose=()=>{try{for(const mesh of Object.values(meshes))gl.deleteBuffer(mesh.buffer);gl.deleteProgram(program);}catch(error){}};
+    }
+    let supported=!!gl;
+    if(gl){try{initializeWebGL();}catch(error){supported=false;try{dispose();}catch(e){};gl=null;fallback();}}
+    else fallback();
+    api={supported,setState(value){if(destroyed||!STATES.has(value))return false;state=value;schedule();return true;},setMotion(value){motion=!!value;cancel();schedule();},resize,destroy(){if(destroyed)return;destroyed=true;cancel();observer?.disconnect();intersection?.disconnect();document.removeEventListener('visibilitychange',onVisibility);global.removeEventListener('resize',resize);if(media?.removeEventListener)media.removeEventListener('change',onMedia);else media?.removeListener?.(onMedia);canvas.removeEventListener('webglcontextlost',onLost);canvas.removeEventListener('webglcontextrestored',onRestored);dispose();}};
+    if(global.ResizeObserver){observer=new ResizeObserver(resize);observer.observe(canvas);}
+    if(global.IntersectionObserver){intersection=new IntersectionObserver(entries=>{offscreen=!entries[0]?.isIntersecting;if(offscreen)cancel();else schedule();});intersection.observe(canvas);}
+    document.addEventListener('visibilitychange',onVisibility);global.addEventListener('resize',resize);
+    if(media?.addEventListener)media.addEventListener('change',onMedia);else media?.addListener?.(onMedia);
+    if(gl){canvas.addEventListener('webglcontextlost',onLost);canvas.addEventListener('webglcontextrestored',onRestored);}
+    resize();return api;
+  }
+  global.ArenaRobot3D=Object.freeze({create});
+})(window);
+
+</script>
+<script>
+/* AM Arena local demo tutor. Read-only integration; no model, network, grading or automation. */
+(function (root) {
+  'use strict';
+  var LANGS = ['es', 'en', 'fr'];
+  function trim(value, max) { return String(value == null ? '' : value).trim().slice(0, max || 1800); }
+  function norm(value) { return trim(value, 1800).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[’‘]/g, "'"); }
+  function attempt(fn, fallback) { try { var value = fn(); return value === undefined ? fallback : value; } catch (_) { return fallback; } }
+  function currentLanguage(requested) {
+    var fromApp = attempt(function () { return typeof language === 'string' ? language : 'es'; }, 'es');
+    return LANGS.indexOf(requested) >= 0 ? requested : LANGS.indexOf(fromApp) >= 0 ? fromApp : 'es';
+  }
+  function pick(lang, es, en, fr) { return lang === 'en' ? en : lang === 'fr' ? fr : es; }
+  function getContext() {
+    var p = attempt(function () { return typeof profile === 'function' ? profile() : null; }, null);
+    var c = attempt(function () { return typeof activeCase !== 'undefined' ? activeCase : null; }, null);
+    var id = attempt(function () { return typeof profileId !== 'undefined' ? profileId : null; }, null);
+    var page = attempt(function () { return typeof screen === 'string' ? screen : 'login'; }, 'login');
+    // Read raw records: currentMode(), work() and crystalExamForCase() may initialize or save data.
+    var w = p && c && p.cases ? p.cases[c.id] || null : null;
+    var examRecord = p && p.crystalPractice ? p.crystalPractice.exam : null;
+    var exam = !!((examRecord && ['active', 'paused'].indexOf(examRecord.state) >= 0) ||
+      (w && w.mode === 'exam' && !w.examSubmitted));
+    var objectives = [], issues = [], attempts = w && Array.isArray(w.attempts) ? w.attempts : [];
+    // Never collect answer-bearing data in exam mode, even for other screens or a paused exam.
+    if (c && !c.free && !exam && Array.isArray(c.steps)) {
+      objectives = c.steps.map(function (step, index) {
+        var done = w ? attempt(function () { return typeof checkStep === 'function' ? checkStep(step) === true : false; }, false) : false;
+        return { id: trim(step.id || index, 100), label: trim(step.label, 400), kind: trim(step.check && step.check.kind, 70), done: done };
+      });
+      var diagnostics = attempts[0] && attempts[0].diagnostics;
+      var rows = diagnostics && (diagnostics.steps || diagnostics.objectives || diagnostics.results);
+      if (Array.isArray(rows)) rows.filter(function (row) { return row && row.passed === false; }).slice(0, 3).forEach(function (row) {
+        issues.push({ label: trim(row.label, 240), fields: (Array.isArray(row.rows) ? row.rows : []).filter(function (field) { return field && field.pass === false; }).slice(0, 4).map(function (field) { return trim(field.field, 100); }) });
+      });
+    }
+    var person = c ? attempt(function () { return typeof merchant === 'function' ? merchant(c) : null; }, null) : null;
+    return {
+      profileId: id, name: trim(p && p.name, 100), language: currentLanguage(), screen: page,
+      caseId: c ? trim(c.id, 150) : null, title: c ? trim(c.title, 350) : '',
+      brief: c && !exam ? trim(c.brief, 2200) : '', section: c ? trim(c.section, 70) : '',
+      tool: attempt(function () { return typeof activeTool === 'string' ? activeTool : ''; }, ''),
+      merchant: person && !exam ? trim(person.name, 180) : '', free: !!(c && c.free), exam: exam,
+      objectives: objectives, completed: objectives.filter(function (o) { return o.done; }).length,
+      total: objectives.length, latestScore: !exam && attempts[0] && Number.isFinite(attempts[0].score) ? attempts[0].score : null,
+      latestIssues: issues, attempts: exam ? 0 : attempts.length,
+      hasDraft: !exam && !!attempt(function () { return typeof childDrafts === 'object' && childDrafts && (childDrafts.portal || childDrafts.salesforce); }, false),
+      hasProfile: !!p
+    };
+  }
+  function suggestions(lang, exam) {
+    if (exam) return pick(lang, ['¿Cómo organizo mi revisión?', '¿Cómo redacto con claridad?', '¿Cómo guardo mi trabajo?'], ['How should I organize my review?', 'How can I write clearly?', 'How do I save my work?'], ['Comment organiser ma vérification ?', 'Comment rédiger clairement ?', 'Comment enregistrer mon travail ?']);
+    return pick(lang, ['Dame una pista', '¿Qué me falta?', 'Ayúdame con el correo'], ['Give me a hint', 'What is still pending?', 'Help me with the email'], ['Donne-moi un indice', 'Que reste-t-il à faire ?', 'Aide-moi avec le courriel']);
+  }
+  function response(text, intent, lang, exam, custom) { return { text: text, suggestions: custom || suggestions(lang, exam), intent: intent }; }
+  function knownOutside(q) {
+    return /\b(nvidia|bitcoin|crypto|criptomoneda|stock market|bolsa de valores|weather|clima|meteo|horoscop|diagnostico medico|medical diagnosis|receta medica|politica|politics|president|football|soccer|futbol|porn|cocaine|cocaina)\b/.test(q);
+  }
+  function kindHint(kind, lang) {
+    if (/^sf/.test(kind)) return pick(lang,
+      'Revisa la solicitud y sus evidencias antes de elegir el tipo de caso y la categoría. La descripción debe separar lo reportado, lo comprobado y lo pendiente. Un borrador todavía no es un ticket enviado.',
+      'Review the request and its evidence before selecting the case type and category. Separate what was reported, verified and still pending in the description. A draft is not a submitted ticket.',
+      'Vérifie la demande et ses pièces avant de choisir le type de dossier et la catégorie. Distingue les faits signalés, vérifiés et en attente. Un brouillon n’est pas un ticket envoyé.');
+    if (/campaign/i.test(kind)) return pick(lang,
+      'En Marketing, localiza la campaña indicada por el merchant. Distingue presupuesto semanal, límite total, audiencia y estado: son controles diferentes. Cambia únicamente lo autorizado y revisa antes de guardar.',
+      'In Marketing, find the campaign named in the merchant request. Weekly budget, lifetime limit, audience and status are different controls. Change only what was approved and review before saving.',
+      'Dans Marketing, repère la campagne indiquée par le restaurant. Le budget hebdomadaire, le plafond total, l’audience et le statut sont des réglages distincts. Modifie uniquement ce qui est autorisé et vérifie avant d’enregistrer.');
+    if (/Photo|Content|Length/.test(kind)) return pick(lang,
+      'Comprueba que estás editando el producto correcto. La foto debe corresponder al plato y la descripción debe incluir información concreta solicitada. Revisa la vista previa y guarda dentro del editor.',
+      'Check that you are editing the right item. Its photo must match the dish and its description should include the requested concrete details. Review the preview and save inside the editor.',
+      'Vérifie que tu modifies le bon produit. La photo doit correspondre au plat et la description doit contenir les précisions demandées. Vérifie l’aperçu puis enregistre dans l’éditeur.');
+    if (/item|category|modifier/i.test(kind)) return pick(lang,
+      'En Menú, identifica el producto, la categoría o el grupo de opciones de la solicitud. Revisa delivery y pickup por separado cuando corresponda. Conserva los demás productos y guarda el cambio.',
+      'In Menu, identify the item, category or modifier group in the request. Check delivery and pickup separately where applicable. Preserve the other items and save your change.',
+      'Dans Menu, identifie le produit, la catégorie ou le groupe d’options de la demande. Vérifie séparément livraison et retrait si nécessaire. Préserve les autres produits et enregistre.');
+    if (/store|hours|Hours/.test(kind)) return pick(lang,
+      'Revisa Settings y la solicitud antes de modificar la operación. Distingue disponibilidad de tienda, horario habitual y cierre excepcional. Confirma qué cambia y qué debe conservarse.',
+      'Review Settings and the request before changing operations. Store availability, normal hours and exceptional closures are different. Confirm what should change and what must be preserved.',
+      'Vérifie Settings et la demande avant de modifier l’exploitation. La disponibilité, les horaires habituels et les fermetures exceptionnelles sont distincts. Identifie ce qui change et ce qui reste.');
+    if (/Reply|reply/.test(kind)) return emailHelp(lang);
+    if (kind === 'quiz' || kind === 'decision') return pick(lang,
+      'Vuelve a los hechos de la solicitud y distingue autorización, comprobaciones y pendientes. Elige el criterio que puedas justificar con esa información, sin asumir aprobaciones o resultados.',
+      'Return to the facts in the request and distinguish authorization, checks and pending actions. Choose the judgment you can support with that information; do not assume approval or completion.',
+      'Reviens aux faits de la demande et distingue autorisation, vérifications et points en attente. Choisis le raisonnement justifié par ces éléments sans supposer une approbation ou un résultat.');
+    if (kind === 'notes') return pick(lang,
+      'Organiza tus notas en diagnóstico, acción y seguimiento. Describe hechos concretos del caso; evita repetir la misma frase en los tres campos.',
+      'Organize your notes into diagnosis, action and follow-up. Describe specific case facts rather than repeating the same sentence in all three fields.',
+      'Organise tes notes en diagnostic, action et suivi. Décris les faits précis du cas au lieu de répéter la même phrase dans les trois champs.');
+    return pick(lang,
+      'Vuelve a la solicitud, identifica la información que debes revisar y abre el apartado correspondiente. Leer una pantalla y guardar un cambio son objetivos distintos.',
+      'Return to the request, identify what you need to review and open the relevant section. Visiting a screen and saving a change are different objectives.',
+      'Reviens à la demande, identifie les informations à vérifier puis ouvre la rubrique adaptée. Consulter un écran et enregistrer une modification sont des objectifs différents.');
+  }
+  function emailHelp(lang) {
+    return pick(lang,
+      'Construye tu respuesta en cuatro partes: reconoce la situación del merchant; explica solo lo que realmente guardaste o solicitaste; aclara lo que sigue pendiente; termina con el próximo paso. Mantén un tono amable y concreto. No prometas envíos, reactivaciones o reembolsos que todavía no estén confirmados. Tú redactas el correo; yo te ayudo a revisarlo.',
+      'Build your reply in four parts: acknowledge the merchant’s situation; explain only what you actually saved or requested; clarify what remains pending; finish with the next step. Be kind and specific. Do not promise shipments, reactivations or refunds that are not confirmed. You write the email; I help you review it.',
+      'Construis ta réponse en quatre parties : reconnais la situation du restaurant ; explique uniquement ce que tu as enregistré ou demandé ; précise ce qui reste en attente ; termine par la prochaine étape. Reste aimable et concret. Ne promets pas un envoi, une réactivation ou un remboursement non confirmé. Tu rédiges le courriel ; je t’aide à le revoir.');
+  }
+  function examAnswer(q, lang) {
+    if (/micro|voz|voice|audio|speech|parler|voix/.test(q)) return response(pick(lang,
+      'Durante el examen puedo explicar los controles del asistente: el micrófono introduce tu pregunta y el altavoz permite escuchar una respuesta. Su disponibilidad depende del navegador. No utilizo la voz para revelar respuestas del caso.',
+      'During the exam I can explain assistant controls: the microphone enters your question and the speaker reads a response. Availability depends on the browser. Voice does not bypass exam help limits.',
+      'Pendant l’examen, je peux expliquer mes commandes : le microphone saisit ta question et le haut-parleur lit la réponse. Leur disponibilité dépend du navigateur. La voix ne contourne pas les limites d’aide de l’examen.'), 'exam-controls', lang, true);
+    if (/correo|email|e-mail|courriel|redact|write|claridad|clarity|clearly/.test(q)) return response(pick(lang,
+      'Pista general de examen: escribe con frases claras, reconoce la situación, distingue hechos de pendientes y señala el siguiente paso. Comprueba que tus afirmaciones están respaldadas por tu trabajo. No puedo revisar objetivos ocultos, indicar datos esperados ni redactar la solución durante el examen.',
+      'General exam hint: write clear sentences, acknowledge the situation, distinguish facts from pending actions and state the next step. Check that your claims are supported by your work. I cannot inspect hidden objectives, provide expected values or write the solution during the exam.',
+      'Indice général d’examen : rédige clairement, reconnais la situation, distingue les faits des actions en attente et précise la prochaine étape. Vérifie que tes affirmations correspondent à ton travail. Je ne peux pas examiner des objectifs cachés, fournir des valeurs attendues ou rédiger la solution pendant l’examen.'), 'exam-writing', lang, true);
+    if (/guard|save|enregistr|submit|envi|borrador|draft|brouillon/.test(q)) return response(pick(lang,
+      'Pista general de examen: utiliza Save o el botón de envío del formulario donde trabajas y revisa su confirmación. La evaluación se entrega desde los controles del examen. Escribir en un campo no equivale a guardar. No comprobaré por ti qué objetivos están resueltos.',
+      'General exam hint: use Save or the submission button in the form you are working on and check its confirmation. Submit your assessment through the exam controls. Typing into a field does not save it. I will not check which objectives are solved for you.',
+      'Indice général d’examen : utilise Save ou le bouton d’envoi du formulaire et vérifie la confirmation. Remets ton évaluation avec les commandes de l’examen. Saisir du texte ne l’enregistre pas. Je ne vérifierai pas à ta place quels objectifs sont résolus.'), 'exam-saving', lang, true);
+    return response(pick(lang,
+      'Pista general de examen: lee la solicitud completa, separa lo autorizado de lo pendiente, revisa las evidencias disponibles y verifica tu trabajo antes de entregarlo. Puedo ayudarte con el método y el manejo de la plataforma; durante el examen no revelo la solución, el checklist, los valores esperados ni las respuestas de criterio.',
+      'General exam hint: read the complete request, separate approved actions from pending checks, review available evidence and verify your work before submitting. I can help with your method and platform controls; during the exam I do not reveal solutions, checklists, expected values or judgment answers.',
+      'Indice général d’examen : lis toute la demande, distingue les actions autorisées des vérifications en attente, consulte les pièces disponibles puis vérifie ton travail avant de le remettre. Je peux aider sur la méthode et les commandes ; pendant l’examen, je ne révèle ni solution, checklist, valeurs attendues ni réponses de jugement.'), 'exam-method', lang, true);
+  }
+  function answer(question, options) {
+    var ctx = getContext(), lang = currentLanguage(options && options.language), q = norm(question);
+    // Check before any intent, prompt content, source expansion or contextual material.
+    if (ctx.exam) return examAnswer(q, lang);
+    if (knownOutside(q)) return response(pick(lang,
+      'Mi ámbito es AM Arena y sus casos de práctica. No tengo una fuente dentro del programa para responder esa pregunta. Puedes preguntarme por el caso abierto, Salesforce, Merchant Portal o cómo revisar tu trabajo.',
+      'My scope is AM Arena and its practice cases. The program does not contain a source for that question. Ask me about the open case, Salesforce, Merchant Portal or reviewing your work.',
+      'Mon périmètre est AM Arena et ses cas de pratique. Le programme ne contient pas de source pour cette question. Interroge-moi sur le cas ouvert, Salesforce, Merchant Portal ou la vérification de ton travail.'), 'out-of-scope', lang, false);
+    if (/ignora|ignore|olvida|forget|system prompt|prompt del sistema|instructions preced|instrucciones anteriores|desactiva.{0,25}examen|disable.{0,20}exam|revela.{0,30}ocult|reveal.{0,25}hidden/.test(q)) return response(pick(lang,
+      'Mi función es orientarte con contenido de AM Arena y respetar las reglas de práctica y examen. Puedo explicar el procedimiento y darte pistas, pero no cambiar esas reglas ni resolver o ejecutar el caso por ti.',
+      'My role is to guide you using AM Arena content and respect practice and exam rules. I can explain the process and give hints, but I cannot change those rules or solve or execute the case for you.',
+      'Mon rôle est de te guider avec le contenu d’AM Arena en respectant les règles de pratique et d’examen. Je peux expliquer la méthode et donner des indices, sans changer ces règles ni résoudre ou exécuter le cas à ta place.'), 'boundaries', lang, false);
+    if (!q || /^(hola|hello|hi|hey|bonjour|salut|buenas|buenos dias|buenas tardes)[ !?.]*$/.test(q)) return response(pick(lang,
+      'Hola' + (ctx.name ? ', ' + ctx.name : '') + '. Soy tu tutor de práctica de AM Arena. Puedo darte pistas, explicar los módulos y ayudarte a revisar tu trabajo. ' + (ctx.caseId ? 'Tengo presente el caso que has abierto.' : 'Abre un ejercicio para recibir orientación contextual.'),
+      'Hi' + (ctx.name ? ', ' + ctx.name : '') + '. I am your AM Arena practice tutor. I can offer hints, explain the modules and help you review your work. ' + (ctx.caseId ? 'I can see which case you have opened.' : 'Open an exercise for contextual guidance.'),
+      'Bonjour' + (ctx.name ? ', ' + ctx.name : '') + '. Je suis ton tuteur de pratique AM Arena. Je peux donner des indices, expliquer les modules et t’aider à vérifier ton travail. ' + (ctx.caseId ? 'Je connais le cas que tu as ouvert.' : 'Ouvre un exercice pour une aide contextuelle.')), 'greeting', lang, false);
+    if (/\b(ia|ai|llm|chatgpt|inteligencia|intelligence|modelo|model|internet|offline|demo|demostracion|cost|costo|precio|free|gratis)\b/.test(q)) return response(pick(lang,
+      'Esta es una demo local sin gasto: selecciono orientaciones preparadas a partir de AM Arena y del contexto del ejercicio. No estoy conectado a un modelo de IA y no comprendo preguntas abiertas como un chat con IA. No envío tus mensajes a un servidor. Las funciones de voz dependen del navegador y su servicio de reconocimiento puede necesitar internet.',
+      'This is a free local demo: I select prepared guidance from AM Arena and the exercise context. I am not connected to an AI model and do not understand open questions like an AI chat. I do not send your messages to a server. Voice functions depend on the browser; its recognition service may require internet.',
+      'C’est une démo locale sans frais : je sélectionne des conseils préparés selon AM Arena et le contexte de l’exercice. Je ne suis pas connecté à un modèle d’IA et ne comprends pas les questions ouvertes comme un chat IA. Je n’envoie pas tes messages à un serveur. La voix dépend du navigateur ; son service de reconnaissance peut nécessiter internet.'), 'demo', lang, false);
+    if (/hazlo|haz el|resuelv|solve.{0,25}(case|exercise)|do it for me|ejecuta|execute|apply the|aplica los|fais.le|resous|remplis|completa.{0,20}(caso|formulario)|escribe.{0,20}(correo completo|respuesta completa)|write.{0,20}(entire|full).{0,10}(email|reply)/.test(q)) return response(pick(lang,
+      'Puedo explicarte el procedimiento y ayudarte a comprobar tu razonamiento; tú realizas las acciones y redactas la respuesta. No modifico formularios, envío tickets ni completo el caso por ti. Pídeme una pista sobre el siguiente objetivo.',
+      'I can explain the process and help you check your reasoning; you perform the actions and write the reply. I do not change forms, submit tickets or complete the case for you. Ask for a hint about the next objective.',
+      'Je peux expliquer la méthode et t’aider à vérifier ton raisonnement ; tu effectues les actions et rédiges la réponse. Je ne modifie pas les formulaires, n’envoie pas de tickets et ne termine pas le cas à ta place. Demande un indice sur le prochain objectif.'), 'tutor-only', lang, false);
+    if (/correo|email|e-mail|courriel|empath|empati|redact|reply|respuesta al merchant|message au|repondre|respuesta.*cliente/.test(q)) return response(emailHelp(lang) + '\n\n' + pick(lang,
+      'La revisión de correos de esta versión utiliza reglas locales y es orientativa. Una puntuación no sustituye comprobar que lo escrito coincide con el caso y con los cambios guardados.',
+      'This version reviews emails with indicative local rules. A score does not replace checking that the message matches the case and the saved changes.',
+      'Cette version évalue les courriels avec des règles locales indicatives. Une note ne remplace pas la vérification de la cohérence avec le cas et les modifications enregistrées.'), 'email', lang, false);
+    if (/por que|porque|why|pourquoi|equivo|error|wrong|fall|falla|no.{0,14}(complet|aprueb|pas|funcion)|doesn.t|not.{0,10}(pass|complete)|ne.{0,12}(valide|fonctionne)|erreur/.test(q)) {
+      if (!ctx.caseId || ctx.free) return response(pick(lang,
+        'Abre un ejercicio evaluado para que pueda relacionar la orientación con sus objetivos. Si el problema es un cambio que no aparece, comprueba primero si lo guardaste dentro de la herramienta.',
+        'Open a graded exercise so I can relate guidance to its objectives. If a change is missing, first check whether you saved it inside the tool.',
+        'Ouvre un exercice évalué pour que je puisse relier mes conseils à ses objectifs. Si une modification manque, vérifie d’abord son enregistrement dans l’outil.'), 'error-no-case', lang, false);
+      var pendingError = ctx.objectives.find(function (o) { return !o.done; });
+      if (!pendingError) return response(pick(lang,
+        'Los indicadores disponibles muestran los objetivos completos. Si aún ves un problema, revisa que el cambio esté guardado y vuelve a consultar la evaluación del ejercicio; los indicadores en vivo pueden incluir borradores compatibles.',
+        'The available indicators show complete objectives. If you still see a problem, check that the change is saved and review the exercise assessment; live indicators can include supported drafts.',
+        'Les indicateurs disponibles montrent les objectifs terminés. Si un problème subsiste, vérifie l’enregistrement et consulte l’évaluation ; les indicateurs en direct peuvent inclure des brouillons compatibles.'), 'error-complete', lang, false);
+      var detail = ctx.latestIssues.length && ctx.latestIssues[0].fields.length ? '\n\n' + pick(lang, 'En el último intento aparecen campos por revisar: ', 'The last attempt includes fields to review: ', 'Le dernier essai contient des champs à vérifier : ') + ctx.latestIssues[0].fields.join(', ') + '.' : '';
+      return response(pick(lang, 'El primer objetivo que aún no se verifica es: ', 'The first objective not yet verified is: ', 'Le premier objectif non encore vérifié est : ') + pendingError.label + '.\n\n' + kindHint(pendingError.kind, lang) + detail + '\n\n' + pick(lang,
+        'Esto indica qué revisar; no confirma por sí solo que exista un fallo técnico. Si editaste un borrador, comprueba también el guardado.',
+        'This indicates what to review; it does not itself confirm a technical fault. If you edited a draft, also check that it was saved.',
+        'Cela indique quoi vérifier, sans confirmer à lui seul une panne technique. Si tu as modifié un brouillon, vérifie aussi son enregistrement.'), 'error', lang, false);
+    }
+    if (/pista|hint|indice|siguiente|next|prochain|atascad|stuck|bloque|no se que|no se por|no se como|donde|where|ou cliquer|que hago|what.{0,12}do|comment faire|ayuda.{0,12}caso|help.{0,15}case|aide.{0,15}cas/.test(q)) {
+      if (!ctx.caseId) return response(pick(lang,
+        'Primero abre una solicitud de Dmail o un ejercicio del catálogo. Lee lo que necesita el merchant y revisa Evidencias. Después podré orientarte sobre el caso que estés practicando.',
+        'First open a Dmail request or a catalog exercise. Read what the merchant needs and review Evidence. Then I can guide you through the case you are practicing.',
+        'Ouvre d’abord une demande Dmail ou un exercice du catalogue. Lis le besoin du restaurant et consulte les pièces. Je pourrai ensuite te guider dans le cas en cours.'), 'hint-no-case', lang, false);
+      if (ctx.free) return response(pick(lang,
+        'Estás en modo libre: aquí puedes explorar los controles sin objetivos ni calificación del ejercicio. Abre un caso del catálogo si quieres practicar una solicitud con pasos verificables.',
+        'You are in free practice: explore the controls without exercise objectives or a grade. Open a catalog case to practice a request with verifiable steps.',
+        'Tu es en pratique libre : explore les commandes sans objectifs ni note d’exercice. Ouvre un cas du catalogue pour pratiquer une demande avec des étapes vérifiables.'), 'hint-free', lang, false);
+      var next = ctx.objectives.find(function (o) { return !o.done; });
+      if (!next) return response(pick(lang,
+        'Los indicadores muestran los objetivos completos. Antes de evaluar, revisa el guardado de tus cambios y que tu correo describa fielmente lo realizado. La decisión final y la entrega siguen en tus manos.',
+        'The indicators show complete objectives. Before evaluating, review saved changes and make sure your email accurately describes your work. The final decision and submission remain yours.',
+        'Les indicateurs montrent les objectifs terminés. Avant l’évaluation, vérifie l’enregistrement et assure-toi que ton courriel décrit fidèlement ton travail. La décision finale et la remise te reviennent.'), 'hint-complete', lang, false);
+      return response(pick(lang, 'Vamos por una pista: enfócate en «', 'Here is a hint: focus on “', 'Voici un indice : concentre-toi sur « ') + next.label + pick(lang, '».\n\n', '”.\n\n', ' ».\n\n') + kindHint(next.kind, lang) + '\n\n' + pick(lang,
+        'Puedes usar “Muéstrame dónde” en el panel de objetivos para que la plataforma señale los controles. Tú haces los clics y guardas.',
+        'Use “Show me where” in the objectives panel to highlight the controls. You perform the clicks and save.',
+        'Utilise « Montrez-moi où » dans le panneau des objectifs pour repérer les commandes. Tu effectues les clics et enregistres.'), 'hint', lang, false);
+    }
+    if (/progreso|progress|avance|puntua|score|nota|pendiente|pending|falta|remaining|reste|objectif|objetivo|checklist/.test(q)) {
+      if (!ctx.caseId || ctx.free) return response(pick(lang,
+        'Cada perfil conserva su avance e intentos. Abre un ejercicio evaluado para ver sus objetivos y consulta Mi aprendizaje → Historial para revisar evaluaciones guardadas.',
+        'Each profile keeps its progress and attempts. Open a graded exercise to see its objectives, and use My learning → History to review saved assessments.',
+        'Chaque profil conserve sa progression et ses essais. Ouvre un exercice évalué pour voir ses objectifs et consulte Mon apprentissage → Historique pour les évaluations enregistrées.'), 'progress-no-case', lang, false);
+      var pending = ctx.objectives.filter(function (o) { return !o.done; });
+      return response(pick(lang,
+        'Los indicadores actuales muestran ' + ctx.completed + ' de ' + ctx.total + ' objetivos completos.',
+        'Current indicators show ' + ctx.completed + ' of ' + ctx.total + ' objectives complete.',
+        'Les indicateurs actuels montrent ' + ctx.completed + ' objectifs terminés sur ' + ctx.total + '.') + (pending.length ? '\n\n' + pick(lang, 'Empieza revisando: ', 'Start by reviewing: ', 'Commence par vérifier : ') + pending.slice(0, 3).map(function (o) { return o.label; }).join(' · ') + '.' : '') + '\n\n' + pick(lang,
+        'Los indicadores en vivo pueden incluir borradores compatibles. Guarda tus cambios antes de entregar una evaluación.',
+        'Live indicators can include supported drafts. Save your changes before submitting an assessment.',
+        'Les indicateurs en direct peuvent inclure des brouillons compatibles. Enregistre tes modifications avant de remettre une évaluation.'), 'progress', lang, false);
+    }
+    if (/caso actual|caso abierto|este caso|current case|open case|this case|cas actuel|ce cas|solicitud|request|demande|resumen|summary|resume/.test(q)) return response(ctx.caseId ? pick(lang,
+      'Estás practicando «' + ctx.title + '»' + (ctx.merchant ? ' para ' + ctx.merchant : '') + '.\n\n' + ctx.brief + '\n\nAntes de actuar, separa qué se autoriza, qué se debe comprobar y qué queda pendiente.',
+      'You are practicing “' + ctx.title + '”' + (ctx.merchant ? ' for ' + ctx.merchant : '') + '.\n\n' + ctx.brief + '\n\nBefore acting, separate what is approved, what needs checking and what remains pending.',
+      'Tu pratiques « ' + ctx.title + ' »' + (ctx.merchant ? ' pour ' + ctx.merchant : '') + '.\n\n' + ctx.brief + '\n\nAvant d’agir, distingue ce qui est autorisé, ce qui doit être vérifié et ce qui reste en attente.') : pick(lang,
+      'No hay un caso abierto. Entra a Dmail o al catálogo y abre un ejercicio; entonces podré relacionar mis pistas con su solicitud.',
+      'No case is open. Go to Dmail or the catalog and open an exercise; then I can relate hints to its request.',
+      'Aucun cas n’est ouvert. Va dans Dmail ou le catalogue et ouvre un exercice ; je pourrai alors adapter mes indices à sa demande.'), 'case', lang, false);
+    if (/foto|photo|imagen|image|evidenc|attachment|adjunt|piece|document|capture|captura/.test(q)) return response(pick(lang,
+      'Evidencias reúne la solicitud y los archivos del ejercicio. Para una foto, confirma que corresponde al producto y revisa la vista previa. “Usar en editor” prepara un borrador: debes guardar en el formulario. Para un ticket, revisa si necesitas adjuntar el archivo de evidencia correspondiente.',
+      'Evidence contains the exercise request and files. For a photo, check that it matches the item and review the preview. “Use in editor” prepares a draft: save it in the form. For a ticket, check whether the relevant evidence file needs attaching.',
+      'Les pièces regroupent la demande et les fichiers de l’exercice. Pour une photo, vérifie qu’elle correspond au produit et consulte l’aperçu. « Utiliser dans l’éditeur » prépare un brouillon : enregistre-le dans le formulaire. Pour un ticket, vérifie si la pièce correspondante doit être jointe.'), 'evidence', lang, false);
+    if (/salesforce|ticket|impresora|printer|imprimante|tablet|reactiva|refund|reembolso|remboursement/.test(q)) return response(pick(lang,
+      'El simulador de Salesforce permite crear casos de cuenta, actualización de menú y procesamiento de fotos. Lee la solicitud para elegir el tipo y documentar los datos concretos, las evidencias y el seguimiento. Crear un ticket registra una solicitud: no demuestra que se haya aprobado un envío, una reactivación o un reembolso.',
+      'The Salesforce simulator supports account, menu-update and photo-processing cases. Read the request to select the type and document specific facts, evidence and follow-up. Creating a ticket records a request; it does not prove approval of a shipment, reactivation or refund.',
+      'Le simulateur Salesforce permet de créer des dossiers de compte, de mise à jour de menu et de traitement de photos. Lis la demande pour choisir le type et documenter les faits, les pièces et le suivi. Créer un ticket enregistre une demande sans prouver l’approbation d’un envoi, d’une réactivation ou d’un remboursement.'), 'salesforce', lang, false);
+    if (/marketing|campaign|campan|bogo|sponsored|audien|presupuesto|budget|publicidad|advertis|promotion/.test(q)) return response(pick(lang,
+      'En Marketing practicas Sponsored Listings y promociones BOGO. El presupuesto semanal, el límite total, la audiencia, los productos elegibles y el estado son ajustes distintos. Trabaja sobre la campaña solicitada, limita el cambio a lo autorizado y guarda antes de comunicarlo.',
+      'In Marketing you practice Sponsored Listings and BOGO promotions. Weekly budget, lifetime limit, audience, eligible items and status are separate settings. Use the requested campaign, limit changes to what was approved and save before communicating completion.',
+      'Dans Marketing, tu pratiques Sponsored Listings et les promotions BOGO. Budget hebdomadaire, plafond total, audience, produits éligibles et statut sont des réglages distincts. Travaille sur la campagne demandée, respecte l’autorisation et enregistre avant d’annoncer le résultat.'), 'marketing', lang, false);
+    if (/merchant portal|portal|menu|modifier|modificad|categoria|categor|pickup|delivery|producto|product|produit|horario|hours|horaire|tienda|store|restaurant/.test(q)) return response(pick(lang,
+      'Merchant Portal es el simulador donde practicas menú, fotos, precios, categorías, opciones, campañas y configuración operativa. Comprueba la tienda seleccionada y el alcance de la solicitud. Los cambios se guardan en el simulador; no afectan a una tienda real de DoorDash.',
+      'Merchant Portal is the simulator for menu items, photos, prices, categories, modifiers, campaigns and operating settings. Check the selected store and request scope. Changes are saved in the simulator and do not affect a real DoorDash store.',
+      'Merchant Portal est le simulateur des produits, photos, prix, catégories, options, campagnes et paramètres d’exploitation. Vérifie le restaurant sélectionné et la portée de la demande. Les modifications restent dans le simulateur et n’affectent aucun restaurant DoorDash réel.'), 'portal', lang, false);
+    if (/memori|memory|remember|recuerd|histori|history|profil|perfil|privac|borrar|delete|effacer|confiden/.test(q)) return response(pick(lang,
+      'AM Arena separa el avance por perfil en este navegador. La demo del asistente puede conservar conversaciones y preferencias en el perfil seleccionado. Cambia de participante para usar otro historial y utiliza el control de borrar conversación para retirarla. No hay sincronización automática entre computadoras.',
+      'AM Arena separates progress by profile in this browser. The assistant demo can keep conversations and preferences in the selected profile. Switch participants to use another history, and use clear conversation to remove it. There is no automatic sync between computers.',
+      'AM Arena sépare la progression par profil dans ce navigateur. La démo peut conserver les conversations et préférences du profil sélectionné. Change de participant pour utiliser un autre historique et utilise Effacer la conversation pour le supprimer. Il n’y a pas de synchronisation automatique entre ordinateurs.'), 'memory', lang, false);
+    if (/voz|voice|micro|audio|speech|voix|parler|hablar|escuchar|listen/.test(q)) return response(pick(lang,
+      'Puedes escribir siempre. La lectura en voz alta usa las voces disponibles del navegador y sigue el idioma de AM Arena. El micrófono requiere compatibilidad y permiso; si el navegador no lo permite o falla el servicio, continúa escribiendo. La entrada por voz no cambia las reglas del tutor.',
+      'You can always type. Read-aloud uses browser voices and follows AM Arena’s language. The microphone requires browser support and permission; if unavailable or the service fails, continue typing. Voice input does not change tutor rules.',
+      'Tu peux toujours écrire. La lecture à voix haute utilise les voix du navigateur et suit la langue d’AM Arena. Le microphone nécessite compatibilité et autorisation ; s’il est indisponible ou si le service échoue, continue par écrit. La voix ne change pas les règles du tuteur.'), 'voice', lang, false);
+    if (/am arena|plataforma|platform|plateforme|como.{0,15}(usar|funciona)|how.{0,15}(use|work)|comment.{0,15}(utilis|fonction)|que puedes|what can|que fais|ayuda|help|aide|capaci/.test(q)) return response(pick(lang,
+      'AM Arena entrena la atención completa: recibe la solicitud en Dmail, revisa Evidencias, trabaja en Merchant Portal o Salesforce, guarda y comunica el siguiente paso. Yo doy pistas y explicaciones sin realizar acciones por ti. En Mi aprendizaje encuentras sesiones, favoritos, repaso e historial; el modo examen limita mi ayuda a orientaciones generales.',
+      'AM Arena trains the complete support flow: receive the Dmail request, review Evidence, work in Merchant Portal or Salesforce, save and communicate the next step. I offer hints and explanations without acting for you. My learning contains sessions, favorites, review and history; exam mode limits my help to general guidance.',
+      'AM Arena entraîne le parcours complet : reçois la demande dans Dmail, consulte les pièces, travaille dans Merchant Portal ou Salesforce, enregistre puis communique la prochaine étape. Je donne des indices et explications sans agir à ta place. Mon apprentissage regroupe sessions, favoris, révision et historique ; en examen, mon aide reste générale.'), 'platform', lang, false);
+    return response(pick(lang,
+      'No tengo una respuesta preparada para esa pregunta en esta demo local. Mi ámbito es AM Arena: prueba con “Dame una pista”, “¿Qué me falta?” o una pregunta sobre Salesforce, Merchant Portal, marketing, fotos o el correo del ejercicio. No inventaré una respuesta fuera de esas fuentes.',
+      'This local demo has no prepared answer for that question. My scope is AM Arena: try “Give me a hint”, “What is still pending?” or ask about Salesforce, Merchant Portal, marketing, photos or the exercise email. I will not invent an answer outside those sources.',
+      'Cette démo locale n’a pas de réponse préparée à cette question. Mon périmètre est AM Arena : essaie « Donne-moi un indice », « Que reste-t-il à faire ? » ou une question sur Salesforce, Merchant Portal, Marketing, les photos ou le courriel de l’exercice. Je n’inventerai pas de réponse hors de ces sources.'), 'unknown', lang, false);
+  }
+  root.ArenaTutor = Object.freeze({ getContext: getContext, answer: answer, version: 'local-demo-1' });
+})(window);
+
+</script>
+<script>
+/* ARI · AM Arena assistant demo. No remote model, credentials, or paid services. */
+(() => {
+ 'use strict';
+ if (window.ArenaAssistantDemo) return;
+ const L = {
+  es: {assistant:'Tu tutor de AM Arena',open:'Abrir asistente ARI',close:'Minimizar',settings:'Preferencias',back:'Volver al chat',demo:'DEMO LOCAL',headline:'Vamos paso a paso.',sub:'Tú resuelves. Yo te acompaño.',notice:'Respuestas locales sobre AM Arena. Esta demo no tiene IA conectada.',placeholder:'Pregúntame sobre este caso…',send:'Enviar pregunta',mic:'Dictar pregunta',stopMic:'Detener dictado',voiceOn:'Silenciar respuestas',voiceOff:'Activar voz',stop:'Detener voz',ready:'Listo para ayudarte',thinking:'Revisando el contexto…',listening:'Escuchando… revisa el texto antes de enviar.',speech:'Hablando…',exam:'Examen · solo orientación general',home:'Explorar AM Arena',guest:'Vista de demostración · sin perfil',welcome:'Hola, soy ARI. Puedo ayudarte a entender AM Arena y darte pistas para que resuelvas los casos. ¿Por dónde empezamos?',profileWelcome:'Hola, {name}. Soy ARI, tu tutor. Pregúntame por el caso o por las herramientas; tú mantienes el control de las acciones.',emptyExam:'Durante el examen puedo ayudarte con el método de trabajo y el manejo de la plataforma. Las conversaciones de práctica quedan ocultas.',suggest:['Dame una pista','¿Cómo uso AM Arena?','Ayúdame con el correo'],examSuggest:['¿Cómo organizo mi trabajo?','¿Cómo reviso antes de entregar?','¿Qué ayuda puedes darme?'],voiceTitle:'Voz de las respuestas',voiceDesc:'Lee las respuestas al enviarlas. Utiliza las voces disponibles de tu navegador.',voice:'Voz',automatic:'Automática según el idioma',noVoices:'No hay una voz de este idioma disponible. Puedes leer las respuestas.',motion:'Animación del robot',motionDesc:'Desactívala si prefieres menos movimiento.',side:'Ubicación del asistente',right:'Derecha',left:'Izquierda',memory:'Memoria del participante',memoryDesc:'El chat se separa por caso y se guarda con el perfil en este navegador. El respaldo de AM Arena también lo incluye.',clear:'Borrar chat de este contexto',cleared:'Conversación borrada.',saveError:'No se pudo guardar. Mantén esta pestaña abierta y exporta un respaldo.',voiceUnavailable:'La voz no está disponible en este navegador.',micUnavailable:'Este navegador no admite el dictado. Puedes escribir tu pregunta.',micDenied:'El micrófono no tiene permiso. Autorízalo en el navegador o escribe tu pregunta.',micNetwork:'No se pudo conectar el dictado. Revisa la conexión o escribe.',micError:'No se pudo completar el dictado. Puedes volver a intentar o escribir.',micEmpty:'No se detectó voz. Puedes intentar otra vez.',micInfo:'El dictado depende del navegador y puede usar un servicio de reconocimiento en internet. El audio no se guarda en AM Arena. Revisa el texto y pulsa Enviar.',local:'Esta versión usa reglas locales, no una IA conversacional. No requiere claves ni activa servicios de pago.',contextChanged:'Cambió el contexto. Puedes preguntar sobre el nuevo caso.',listen:'Escuchar respuesta',you:'Tú',notSaved:'Selecciona un perfil para conservar el chat al cerrar.',clearGuest:'El chat de esta vista es temporal.',fallback:'Vista simplificada: 3D no disponible en este navegador.',language:'El idioma sigue la configuración de AM Arena.',long:'La pregunta puede tener hasta 1.200 caracteres.',counter:'Máximo 1.200 caracteres',error:'No pude preparar la orientación. Intenta preguntar de otra forma.',caseLabel:'Caso actual',inputLabel:'Tu pregunta para ARI',hideIntro:'Ocultar presentación',restoreIntro:'Mostrar robot',limits:'Sobre esta demo'},
+  en: {assistant:'Your AM Arena tutor',open:'Open ARI assistant',close:'Minimize',settings:'Preferences',back:'Back to chat',demo:'LOCAL DEMO',headline:'One step at a time.',sub:'You solve it. I guide you.',notice:'Local answers about AM Arena. No AI model is connected in this demo.',placeholder:'Ask me about this case…',send:'Send question',mic:'Dictate question',stopMic:'Stop dictation',voiceOn:'Mute replies',voiceOff:'Enable voice',stop:'Stop voice',ready:'Ready when you are',thinking:'Reviewing the context…',listening:'Listening… review the text before sending.',speech:'Speaking…',exam:'Exam · general guidance only',home:'Explore AM Arena',guest:'Demo view · no profile',welcome:'Hi, I’m ARI. I can explain AM Arena and offer hints while you solve the cases. Where would you like to start?',profileWelcome:'Hi, {name}. I’m ARI, your tutor. Ask about the case or the tools; you stay in control of every action.',emptyExam:'During an exam I can help with your approach and platform controls. Practice conversations are hidden.',suggest:['Give me a hint','How do I use AM Arena?','Help me with the email'],examSuggest:['How should I organize my work?','How do I check before submitting?','What help can you give me?'],voiceTitle:'Spoken replies',voiceDesc:'Read replies when they arrive. Uses the voices available in your browser.',voice:'Voice',automatic:'Automatic for the current language',noVoices:'No voice is available for this language. You can read the replies.',motion:'Robot animation',motionDesc:'Turn it off if you prefer less movement.',side:'Assistant position',right:'Right',left:'Left',memory:'Participant memory',memoryDesc:'Chats are separated by case and saved with this profile in this browser. AM Arena backups include them.',clear:'Clear this context’s chat',cleared:'Conversation cleared.',saveError:'Could not save. Keep this tab open and export a backup.',voiceUnavailable:'Speech is not available in this browser.',micUnavailable:'This browser does not support dictation. You can type your question.',micDenied:'Microphone permission is missing. Allow it in your browser or type your question.',micNetwork:'Dictation could not connect. Check your connection or type.',micError:'Dictation could not finish. Try again or type your question.',micEmpty:'No speech was detected. You can try again.',micInfo:'Dictation depends on the browser and may use an online speech service. Audio is not stored in AM Arena. Review the text and press Send.',local:'This version uses local rules, not conversational AI. It needs no keys and does not activate paid services.',contextChanged:'The context changed. You can ask about the new case.',listen:'Listen to reply',you:'You',notSaved:'Choose a profile to keep your chat after closing.',clearGuest:'Chat in this view is temporary.',fallback:'Simplified view: 3D is unavailable in this browser.',language:'The language follows AM Arena settings.',long:'Questions can contain up to 1,200 characters.',counter:'Maximum 1,200 characters',error:'I could not prepare that guidance. Try rephrasing your question.',caseLabel:'Current case',inputLabel:'Your question for ARI',hideIntro:'Hide introduction',restoreIntro:'Show robot',limits:'About this demo'},
+  fr: {assistant:'Votre tuteur AM Arena',open:'Ouvrir l’assistant ARI',close:'Réduire',settings:'Préférences',back:'Retour au chat',demo:'DÉMO LOCALE',headline:'Une étape à la fois.',sub:'Vous résolvez. Je vous guide.',notice:'Réponses locales sur AM Arena. Aucun modèle d’IA n’est connecté dans cette démo.',placeholder:'Posez une question sur ce cas…',send:'Envoyer la question',mic:'Dicter la question',stopMic:'Arrêter la dictée',voiceOn:'Couper la voix',voiceOff:'Activer la voix',stop:'Arrêter la voix',ready:'À votre écoute',thinking:'Examen du contexte…',listening:'À l’écoute… vérifiez le texte avant de l’envoyer.',speech:'Je parle…',exam:'Examen · conseils généraux uniquement',home:'Explorer AM Arena',guest:'Vue de démonstration · sans profil',welcome:'Bonjour, je suis ARI. Je peux expliquer AM Arena et donner des pistes pendant que vous résolvez les cas. Par où commencer ?',profileWelcome:'Bonjour {name}. Je suis ARI, votre tuteur. Posez vos questions sur le cas ou les outils ; vous gardez le contrôle des actions.',emptyExam:'Pendant un examen, je peux aider avec la méthode et les commandes de la plateforme. Les conversations de pratique sont masquées.',suggest:['Donne-moi un indice','Comment utiliser AM Arena ?','Aide-moi avec le courriel'],examSuggest:['Comment organiser mon travail ?','Comment vérifier avant de remettre ?','Quelle aide peux-tu apporter ?'],voiceTitle:'Réponses vocales',voiceDesc:'Lit les nouvelles réponses avec les voix disponibles dans votre navigateur.',voice:'Voix',automatic:'Automatique selon la langue',noVoices:'Aucune voix disponible pour cette langue. Vous pouvez lire les réponses.',motion:'Animation du robot',motionDesc:'Désactivez-la si vous préférez moins de mouvement.',side:'Position de l’assistant',right:'Droite',left:'Gauche',memory:'Mémoire du participant',memoryDesc:'Les discussions sont séparées par cas et enregistrées avec ce profil dans ce navigateur. Les sauvegardes AM Arena les incluent.',clear:'Effacer le chat de ce contexte',cleared:'Conversation effacée.',saveError:'Enregistrement impossible. Gardez cet onglet ouvert et exportez une sauvegarde.',voiceUnavailable:'La voix n’est pas disponible dans ce navigateur.',micUnavailable:'Ce navigateur ne prend pas en charge la dictée. Vous pouvez saisir votre question.',micDenied:'Le microphone n’est pas autorisé. Autorisez-le dans le navigateur ou saisissez votre question.',micNetwork:'Connexion à la dictée impossible. Vérifiez la connexion ou saisissez le texte.',micError:'La dictée n’a pas abouti. Réessayez ou saisissez votre question.',micEmpty:'Aucune parole détectée. Vous pouvez réessayer.',micInfo:'La dictée dépend du navigateur et peut utiliser un service vocal en ligne. AM Arena ne conserve pas l’audio. Vérifiez le texte puis appuyez sur Envoyer.',local:'Cette version utilise des règles locales, pas une IA conversationnelle. Elle ne nécessite aucune clé et n’active aucun service payant.',contextChanged:'Le contexte a changé. Vous pouvez poser une question sur le nouveau cas.',listen:'Écouter la réponse',you:'Vous',notSaved:'Choisissez un profil pour conserver le chat après la fermeture.',clearGuest:'Le chat de cette vue est temporaire.',fallback:'Vue simplifiée : la 3D n’est pas disponible dans ce navigateur.',language:'La langue suit les paramètres AM Arena.',long:'La question peut contenir au maximum 1 200 caractères.',counter:'Maximum 1 200 caractères',error:'Je n’ai pas pu préparer ces conseils. Essayez de reformuler.',caseLabel:'Cas actuel',inputLabel:'Votre question pour ARI',hideIntro:'Masquer la présentation',restoreIntro:'Afficher le robot',limits:'À propos de cette démo'}
+ };
+ const icon = (name) => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+({close:'<path d="M6 12h12"/>',gear:'<path d="m9 3-.6 2.3-2 .9-2.1-.7-1.6 2.8L4.3 10v2l-1.6 1.7 1.6 2.8 2.1-.7 2 .9L9 19h3l.6-2.3 2-.9 2.1.7 1.6-2.8L16.7 12v-2l1.6-1.7-1.6-2.8-2.1.7-2-.9L12 3Z"/><circle cx="10.5" cy="11" r="3"/>',send:'<path d="m5 12 7-7 7 7M12 5v15"/>',mic:'<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/>',sound:'<path d="m11 5-5 4H3v6h3l5 4V5Zm4 3a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/>',mute:'<path d="m11 5-5 4H3v6h3l5 4V5Zm5 4 5 6m0-6-5 6"/>',stop:'<rect x="6" y="6" width="12" height="12" rx="2"/>',back:'<path d="m14 6-6 6 6 6"/>',book:'<path d="M12 6c-3-3-7-3-10-2v15c3-1 7-1 10 2 3-3 7-3 10-2V4c-3-1-7-1-10 2Zm0 0v15"/>',spark:'<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/>'}[name]||'')+'</svg>';
+ const host=document.createElement('div');host.id='arena-assistant-root';host.setAttribute('data-no-translate','');host.setAttribute('data-pm-owned','true');
+ const shadow=host.attachShadow({mode:'open'});document.body.append(host);
+ shadow.innerHTML=`<style>
+ :host{all:initial;position:fixed;right:22px;bottom:18px;z-index:2147482000;color:#242825;font:14px/1.5 Arial,sans-serif;--bg:#fffefa;--ink:#242825;--muted:#6f746f;--line:#e9e9e1;--soft:#f4f4ed;--red:#db3422;--accent:#fdf0e9;--green:#39564a;color-scheme:light}
+ :host([data-side=left]){right:auto;left:22px}:host([data-theme=dark]){--bg:#202623;--ink:#f5f4ed;--muted:#b2bcb4;--line:#3b433e;--soft:#2b332e;--accent:#493027;--green:#b4d7bf;color-scheme:dark}
+ *{box-sizing:border-box}button,input,select,textarea{font:inherit}button{cursor:pointer}button:disabled{cursor:default;opacity:.48}button:focus-visible,textarea:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid #ed715d;outline-offset:3px}[hidden]{display:none!important}svg{width:20px;height:20px;flex:none}button{touch-action:manipulation}button:active{transform:translateY(1px)}
+ .launcher{position:relative;display:flex;align-items:center;gap:9px;border:1px solid #e0e2d7;border-radius:21px;background:var(--bg);color:var(--ink);box-shadow:0 9px 32px #1c2f2422;padding:10px 17px 10px 9px;height:64px;min-width:144px;text-align:left;transition:box-shadow .2s}
+ .launcher:hover{box-shadow:0 12px 35px #1c2f2433}.mini{width:53px;height:54px;position:relative}.mini canvas{position:absolute;width:93px;height:112px;left:-18px;bottom:-6px;pointer-events:none}.launcher b{font:600 20px/1.1 Georgia,serif;letter-spacing:.04em}.launcher small{display:block;font-size:10px;color:var(--muted);margin-top:4px}.launch-dot{position:absolute;right:10px;top:10px;width:6px;height:6px;border-radius:50%;background:#dc4b35}
+ .panel{display:flex;flex-direction:column;width:400px;height:min(750px,calc(100dvh - 36px));max-height:calc(100vh - 36px);background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:23px;box-shadow:0 22px 90px #17372733;overflow:hidden;animation:ari-enter .2s ease-out;isolation:isolate}
+ @keyframes ari-enter{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
+ .top{display:flex;align-items:center;gap:9px;padding:15px 17px 11px;border-bottom:1px solid var(--line);flex:none}.mark{display:grid;place-items:center;width:30px;height:30px;background:var(--accent);color:var(--red);border-radius:10px}.title{margin-right:auto}.title b{font:600 21px/1 Georgia,serif;letter-spacing:.04em}.title small{display:block;color:var(--muted);font-size:10px;margin-top:3px}.tools{display:flex;gap:2px}.icon{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;background:transparent;color:var(--muted);border:0;border-radius:9px;padding:6px}.icon:hover{background:var(--soft);color:var(--ink)}
+ .hero{position:relative;display:flex;align-items:center;min-height:143px;background:radial-gradient(ellipse at 24% 73%,#f8e6d966,transparent 65%);padding:4px 17px 4px 0;flex:none}.stage{width:151px;height:145px;flex:none;position:relative}.stage:before{content:'';position:absolute;left:20px;right:5px;top:8px;bottom:5px;border:1px solid var(--line);border-radius:50%;opacity:.6}.stage canvas{position:relative;width:151px;height:145px;pointer-events:none}.hero-copy{position:relative}.eyebrow{font:600 9px Arial,sans-serif;letter-spacing:.13em;color:var(--red)}.hero h2{font:400 24px/1.12 Georgia,serif;letter-spacing:-.5px;margin:8px 0 7px}.hero p{font-size:11px;color:var(--muted);margin:0}.about{font-size:10px;line-height:1.5;padding:8px 17px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);color:var(--muted);flex:none}.context{display:flex;align-items:center;gap:8px;background:var(--soft);padding:9px 15px;font-size:11px;flex:none;min-height:38px}.context svg{width:15px;height:15px;color:var(--green)}.context-text{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.exam{padding:6px 15px;background:#fff0d2;color:#785522;font-size:10px;flex:none}
+ .messages{flex:1;min-height:70px;overflow:auto;padding:16px 15px 9px;overscroll-behavior:contain;scrollbar-width:thin}.row{display:flex;flex-direction:column;align-items:flex-start;margin-bottom:13px}.row.user{align-items:flex-end}.who{font-size:9px;color:var(--muted);margin:0 6px 4px;letter-spacing:.05em}.bubble{padding:11px 13px;background:var(--soft);border:1px solid var(--line);border-radius:3px 14px 14px 14px;max-width:95%;font-size:12px;line-height:1.65;white-space:pre-line;overflow-wrap:anywhere}.user .bubble{background:var(--green);border-color:transparent;color:var(--bg);border-radius:14px 3px 14px 14px}.replay{font-size:10px;color:var(--muted);border:0;background:transparent;display:inline-flex;align-items:center;gap:4px;padding:5px}.replay svg{width:13px;height:13px}.suggestions{display:flex;gap:6px;flex-wrap:wrap;padding:0 15px 11px;flex:none}.chip{border:1px solid var(--line);background:var(--bg);color:var(--ink);font-size:10px;border-radius:20px;padding:6px 9px}.chip:hover{border-color:var(--red);background:var(--accent)}
+ .status-line{display:flex;align-items:center;gap:7px;padding:0 17px 7px;color:var(--muted);font-size:10px;min-height:20px;flex:none}.status-dot{height:5px;width:5px;border-radius:50%;background:var(--red);flex:none}.stop-voice{border:0;background:var(--soft);color:var(--ink);padding:3px 8px;border-radius:9px;margin-left:auto;font-size:10px}.composer{padding:0 12px 12px;flex:none}.input-wrap{border:1px solid var(--line);background:var(--bg);border-radius:15px;padding:9px;display:flex;align-items:flex-end;gap:5px}.input-wrap:focus-within{border-color:#d78272;box-shadow:0 0 0 2px #db342211}textarea{background:transparent;border:0;outline:none!important;resize:none;color:var(--ink);width:100%;font-size:12px;line-height:1.5;height:44px;max-height:100px;min-width:0;padding:4px 2px}textarea::placeholder{color:var(--muted)}.send{width:33px;height:33px;border:0;background:var(--red);color:white;border-radius:11px;display:grid;place-items:center;flex:none}.mic{width:32px;height:33px;flex:none}.mic.active{background:var(--accent);color:var(--red)}.footer{font-size:9px;line-height:1.4;text-align:center;color:var(--muted);margin:7px 3px 0}
+ .settings-body{flex:1;overflow:auto;padding:19px 19px 24px}.settings-body h2{font:400 25px Georgia,serif;margin:0 0 17px}.setting{padding:15px 0;border-bottom:1px solid var(--line)}.setting:first-of-type{padding-top:0}.setting label{display:flex;align-items:center;gap:10px;justify-content:space-between;font-size:12px;font-weight:600}.setting p{font-size:11px;color:var(--muted);line-height:1.6;margin:7px 0 0}.setting input{accent-color:var(--red);width:17px;height:17px}.setting select{width:100%;padding:9px;border:1px solid var(--line);background:var(--soft);color:var(--ink);border-radius:9px;font-size:11px;margin-top:9px}.clear{margin-top:13px;border:1px solid #dca99f;color:var(--red);background:transparent;border-radius:9px;padding:8px 10px;font-size:11px}.footnote{margin-top:17px;padding:12px;border-radius:12px;background:var(--soft);color:var(--muted);font-size:11px;line-height:1.6}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+ @media(max-width:520px){:host{right:10px;bottom:10px}:host([data-side=left]){left:10px}.panel{width:calc(100vw - 20px);height:min(760px,calc(100dvh - 20px));max-height:calc(100vh - 20px);border-radius:18px}.launcher{min-width:125px;height:57px}.hero{min-height:118px}.stage,.stage canvas{height:118px;width:130px}.hero h2{font-size:22px}}@media(max-height:680px){.hero{display:none}.panel{height:calc(100dvh - 24px)}}@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+ </style>
+ <button id="launcher" class="launcher" type="button" aria-expanded="false"><span id="dock" class="mini"></span><span><b>ARI</b><small data-text="assistant"></small></span><i class="launch-dot" aria-hidden="true"></i></button>
+ <section id="panel" class="panel" role="region" aria-label="ARI" hidden>
+  <header class="top"><span class="mark">${icon('spark')}</span><span class="title"><b>ARI</b><small data-text="assistant"></small></span><div class="tools"><button id="toggleVoice" class="icon" type="button"></button><button id="settingsButton" class="icon" type="button">${icon('gear')}</button><button id="minimize" class="icon" type="button">${icon('close')}</button></div></header>
+  <div id="chatArea" style="display:contents"><div class="hero"><div id="stage" class="stage"></div><div class="hero-copy"><span class="eyebrow" data-text="demo"></span><h2 data-text="headline"></h2><p data-text="sub"></p></div></div><div class="about" data-text="notice"></div><div class="context">${icon('book')}<span id="contextText" class="context-text"></span></div><div id="examNotice" class="exam" data-text="exam" hidden></div><div id="messages" class="messages" role="log" aria-live="off" aria-relevant="additions text" tabindex="0"></div><span id="answerAnnouncer" class="sr-only" role="status" aria-live="polite"></span><div id="suggestions" class="suggestions"></div><div class="status-line"><i class="status-dot" aria-hidden="true"></i><span id="status" role="status"></span><button id="stopVoice" class="stop-voice" type="button" hidden data-text="stop"></button></div><form id="form" class="composer"><label class="sr-only" for="question" data-text="inputLabel"></label><div class="input-wrap"><textarea id="question" maxlength="1200" rows="2"></textarea><button id="micButton" class="icon mic" type="button">${icon('mic')}</button><button id="sendButton" class="send" type="submit">${icon('send')}</button></div><div id="memoryNote" class="footer"></div></form></div>
+  <div id="settingsArea" class="settings-body" hidden><button id="backButton" class="chip" type="button">${icon('back')} <span data-text="back"></span></button><h2 style="margin-top:18px" data-text="settings"></h2><div class="setting"><label><span data-text="voiceTitle"></span><input id="voiceCheck" type="checkbox"></label><p data-text="voiceDesc"></p><label for="voiceSelect" style="margin-top:12px" data-text="voice"></label><select id="voiceSelect"></select><p data-text="language"></p></div><div class="setting"><label><span data-text="motion"></span><input id="motionCheck" type="checkbox"></label><p data-text="motionDesc"></p></div><div class="setting"><label for="sideSelect" data-text="side"></label><select id="sideSelect"><option value="right" data-text="right"></option><option value="left" data-text="left"></option></select></div><div class="setting"><label data-text="memory"></label><p id="memoryDescription" data-text="memoryDesc"></p><button id="clearButton" class="clear" type="button" data-text="clear"></button><p id="settingsStatus" role="status"></p></div><div class="footnote" data-text="micInfo"></div><div class="footnote" data-text="local"></div></div>
+ </section>`;
+ const $=id=>shadow.getElementById(id), canvas=document.createElement('canvas');canvas.setAttribute('aria-hidden','true');$('dock').append(canvas);
+ let robot=null;try{robot=window.ArenaRobot3D.create(canvas);}catch(e){console.warn('ARI renderer unavailable',e);}
+ const synth=window.speechSynthesis, Recognition=window.SpeechRecognition||window.webkitSpeechRecognition;
+ let ctx=null, owner=null, guest={version:1,messages:[],preferences:{}}, mem=guest, opened=false, settingsOpen=false, busy=false, generation=0, recognition=null, speaking=false, utterance=null, currentState='idle', lang='es', signature='', lastScroll=false, lastFocus=null, chatSuggestions=null;
+ const t=key=>L[lang]?.[key]??L.es[key]??key;
+ function readOwner(){try{return typeof profile==='function'?profile():null;}catch(e){return null;}}
+ function defaults(m){if(!m||typeof m!=='object')m={};if(!Array.isArray(m.messages))m.messages=[];if(!m.preferences||typeof m.preferences!=='object')m.preferences={};m.version=1;return m;}
+ function pref(key){const p=mem.preferences;return p[key]??({voice:true,motion:!matchMedia('(prefers-reduced-motion: reduce)').matches,side:'right',voices:{}}[key]);}
+ async function persist(){if(!owner)return;try{if(typeof window.persistPracticeChanges==='function'){if(await window.persistPracticeChanges()===false)status(t('saveError'));}else if(typeof save==='function')save();}catch(e){status(t('saveError'));}}
+ function setPref(key,value){mem.preferences[key]=value;persist();applyPrefs();}
+ function status(message){$('status').textContent=message;}
+ function robotState(next){currentState=next;if(robot)robot.setState(next);$('stopVoice').hidden=!speaking;}
+ function stopSpeech(){speaking=false;utterance=null;try{synth?.cancel();}catch(e){}robotState('idle');if(opened)status(t('ready'));}
+ function stopRecognition(){const old=recognition;recognition=null;if(old)try{old.abort();}catch(e){}$('micButton').classList.remove('active');$('micButton').setAttribute('aria-pressed','false');robotState('idle');}
+ function stopAll(){stopRecognition();stopSpeech();}
+ function locale(){return {es:'es-CR',en:'en-CA',fr:'fr-CA'}[lang];}
+ function scopeKey(c=ctx){return (c?.caseId||'home')+'|'+Boolean(c?.exam);}
+ function messages(){return mem.messages.filter(m=>m&&m.caseId===(ctx?.caseId||null)&&!!m.exam===!!ctx?.exam&&['user','assistant'].includes(m.role)&&typeof m.text==='string').slice(-40);}
+ function speak(text,origin={signature,owner},speechLang=lang){
+  sync();if(origin.signature!==signature||origin.owner!==owner||!opened||settingsOpen)return;
+  if(!synth||!window.SpeechSynthesisUtterance){status(t('voiceUnavailable'));return;}
+  stopRecognition();stopSpeech();const choices=synth.getVoices().filter(v=>v.lang?.toLowerCase().startsWith(speechLang));const selected=pref('voices')?.[speechLang];const voice=choices.find(v=>v.voiceURI===selected)||choices.find(v=>v.default)||choices[0];
+  if(!voice){status(t('noVoices'));return;}
+  const u=new SpeechSynthesisUtterance(text);u.lang=voice.lang||locale();u.voice=voice;u.rate=1;u.pitch=1;utterance=u;const token=signature;
+  u.onstart=()=>{if(utterance!==u)return;sync();if(utterance!==u)return;if(token!==signature||!opened){stopSpeech();return;}speaking=true;robotState('speaking');status(t('speech'));};
+  const finish=()=>{if(utterance!==u)return;speaking=false;utterance=null;robotState('idle');status(t('ready'));};u.onend=finish;u.onerror=finish;
+  try{synth.speak(u);}catch(e){finish();status(t('voiceUnavailable'));}
+ }
+ function renderVoiceOptions(){const select=$('voiceSelect'),keep=pref('voices')?.[lang]||'';select.replaceChildren();const first=document.createElement('option');first.value='';first.textContent=t('automatic');select.append(first);if(synth)for(const voice of synth.getVoices().filter(v=>v.lang?.toLowerCase().startsWith(lang))){const o=document.createElement('option');o.value=voice.voiceURI;o.textContent=voice.name+' · '+voice.lang;select.append(o);}select.value=keep;}
+ function applyPrefs(){host.dataset.side=pref('side')==='left'?'left':'right';$('voiceCheck').checked=!!pref('voice');$('motionCheck').checked=!!pref('motion');$('sideSelect').value=pref('side');$('toggleVoice').innerHTML=icon(pref('voice')?'sound':'mute');$('toggleVoice').title=$('toggleVoice').ariaLabel=t(pref('voice')?'voiceOn':'voiceOff');$('toggleVoice').setAttribute('aria-pressed',String(!!pref('voice')));robot?.setMotion(!!pref('motion'));renderVoiceOptions();}
+ function localize(){host.lang=lang;shadow.querySelectorAll('[data-text]').forEach(n=>n.textContent=t(n.dataset.text));for(const [id,key]of [['launcher','open'],['settingsButton','settings'],['minimize','close'],['sendButton','send'],['micButton','mic']]){$(id).title=t(key);$(id).setAttribute('aria-label',t(key));}$('question').placeholder=t('placeholder');$('question').title=t('counter');$('panel').setAttribute('aria-label','ARI · '+t('assistant'));$('messages').setAttribute('aria-label',t('assistant'));$('micButton').setAttribute('aria-pressed','false');$('memoryNote').textContent=owner?t('language'):t('notSaved');$('memoryDescription').textContent=owner?t('memoryDesc'):t('clearGuest');applyPrefs();status(t('ready'));}
+ function bubble(role,text,welcome=false,messageLanguage=lang){const row=document.createElement('article');row.className='row '+role;row.lang=messageLanguage;const who=document.createElement('span');who.className='who';who.textContent=role==='user'?t('you'):'ARI';const b=document.createElement('div');b.className='bubble';b.textContent=text;row.append(who,b);if(role==='assistant'&&!welcome){const replay=document.createElement('button');replay.type='button';replay.className='replay';replay.innerHTML=icon('sound');const label=document.createElement('span');label.textContent=t('listen');replay.append(label);replay.setAttribute('aria-label',t('listen'));const origin={signature,owner};replay.onclick=()=>speak(text,origin,messageLanguage);row.append(replay);}$('messages').append(row);}
+ function welcome(){if(ctx?.exam)return t('emptyExam');return owner?t('profileWelcome').replace('{name}',ctx?.name||owner.name||''):t('welcome');}
+ function renderMessages(scroll=true){$('messages').replaceChildren();bubble('assistant',welcome(),true);for(const m of messages())bubble(m.role,m.text,false,m.language||lang);if(scroll)$('messages').scrollTop=$('messages').scrollHeight;}
+ function renderSuggestions(){const list=chatSuggestions||(ctx?.exam?t('examSuggest'):t('suggest'));$('suggestions').replaceChildren();for(const q of list.slice(0,3)){const b=document.createElement('button');b.type='button';b.className='chip';b.textContent=q;b.disabled=busy;b.onclick=()=>{$('question').value=q;send();};$('suggestions').append(b);}}
+ function refreshContext(){const c=ctx||{};$('contextText').textContent=c.title||t('home');$('contextText').title=c.title||t('home');$('examNotice').hidden=!c.exam;}
+ function sync(force=false){
+  let next;try{next=window.ArenaTutor.getContext();}catch(e){next={profileId:null,language:'es',exam:false,caseId:null};}
+  const nextOwner=readOwner(), nextLang=['es','en','fr'].includes(next.language)?next.language:'es';const token=JSON.stringify([next.profileId,next.caseId,!!next.exam,nextLang,nextOwner?.profileResetEpoch||null]);
+  const changed=force||signature!==token||owner!==nextOwner;
+  if(changed){generation++;busy=false;stopAll();owner=nextOwner;ctx=next;lang=nextLang;signature=token;if(owner){if(!owner.ariAssistantDemo||typeof owner.ariAssistantDemo!=='object')owner.ariAssistantDemo={version:1,messages:[],preferences:{}};mem=defaults(owner.ariAssistantDemo);}else mem=guest;chatSuggestions=null;$('question').value='';$('answerAnnouncer').textContent='';$('sendButton').disabled=false;$('micButton').disabled=false;localize();refreshContext();renderMessages();renderSuggestions();robot?.resize();}else{ctx=next;refreshContext();}
+  host.dataset.theme=document.documentElement.dataset.crystalTheme==='dark'?'dark':'light';
+  const modal=[...document.querySelectorAll('dialog[open]')].at(-1);const parent=modal||document.body;if(host.parentElement!==parent)parent.append(host);
+ }
+ function setOpen(value){sync();opened=!!value;$('panel').hidden=!opened;$('launcher').hidden=opened;$('launcher').setAttribute('aria-expanded',String(opened));if(opened){settingsOpen=false;$('settingsArea').hidden=true;$('chatArea').style.display='contents';lastFocus=document.activeElement;$('stage').append(canvas);robot?.resize();renderMessages();renderSuggestions();status(t('ready'));setTimeout(()=>$('question').focus({preventScroll:true}),80);}else{generation++;busy=false;$('sendButton').disabled=false;$('micButton').disabled=false;stopAll();$('dock').append(canvas);robot?.resize();$('launcher').focus({preventScroll:true});}robot?.setMotion(!!pref('motion'));}
+ function showSettings(value){settingsOpen=!!value;$('settingsArea').hidden=!settingsOpen;$('chatArea').style.display=settingsOpen?'none':'contents';if(settingsOpen){stopAll();renderVoiceOptions();$('backButton').focus();}else{robot?.resize();$('question').focus();}}
+ async function send(){
+  sync();if(busy)return;const q=$('question').value.trim();if(!q)return;if(q.length>1200){status(t('long'));return;}
+  if(!opened)setOpen(true);stopAll();busy=true;const token=++generation,at=signature,memory=mem,scope=scopeKey();const entry={role:'user',text:q,caseId:ctx?.caseId||null,exam:!!ctx?.exam,language:lang,at:new Date().toISOString()};memory.messages.push(entry);memory.messages=memory.messages.slice(-160);$('question').value='';$('sendButton').disabled=true;$('micButton').disabled=true;renderMessages();renderSuggestions();persist();robotState('thinking');status(t('thinking'));
+  await new Promise(resolve=>setTimeout(resolve,300));
+  if(token!==generation||at!==signature||scope!==scopeKey()||memory!==mem||!opened)return;
+  let result;try{result=window.ArenaTutor.answer(q,{language:lang});}catch(e){result={text:t('error'),suggestions:[],intent:'error'};}
+  // Read context again before publishing; a new exam or participant invalidates this reply.
+  sync();if(token!==generation||at!==signature||scope!==scopeKey()||memory!==mem||!opened)return;
+  const answer=String(result?.text||t('error'));memory.messages.push({role:'assistant',text:answer,caseId:ctx?.caseId||null,exam:!!ctx?.exam,language:lang,at:new Date().toISOString(),intent:result?.intent||'local'});memory.messages=memory.messages.slice(-160);chatSuggestions=Array.isArray(result?.suggestions)&&result.suggestions.length?result.suggestions:null;busy=false;$('sendButton').disabled=false;$('micButton').disabled=false;robotState('idle');renderMessages();renderSuggestions();status(t('ready'));$('answerAnnouncer').textContent=answer;persist();if(pref('voice'))speak(answer);$('question').focus({preventScroll:true});
+ }
+ function dictate(){
+  sync();if(recognition){stopRecognition();status(t('ready'));return;}if(!Recognition){status(t('micUnavailable'));return;}stopSpeech();const token=signature,rec=new Recognition();let committed=$('question').value.trim(),final='',hadResult=false;recognition=rec;rec.lang=locale();rec.continuous=false;rec.interimResults=true;
+  rec.onstart=()=>{if(recognition!==rec||signature!==token){try{rec.abort();}catch(e){}return;}$('micButton').classList.add('active');$('micButton').setAttribute('aria-pressed','true');$('micButton').title=t('stopMic');robotState('listening');status(t('listening'));};
+  rec.onresult=e=>{if(recognition!==rec||signature!==token)return;let interim='';for(let i=e.resultIndex;i<e.results.length;i++){const value=e.results[i][0].transcript;if(e.results[i].isFinal)final+=value+' ';else interim+=value;}hadResult=true;$('question').value=(committed+' '+final+interim).trim().slice(0,1200);};
+  let error='';rec.onerror=e=>{if(recognition!==rec)return;error=t(['not-allowed','service-not-allowed'].includes(e.error)?'micDenied':e.error==='network'?'micNetwork':e.error==='no-speech'?'micEmpty':'micError');status(error);};rec.onend=()=>{if(recognition!==rec)return;recognition=null;$('micButton').classList.remove('active');$('micButton').setAttribute('aria-pressed','false');$('micButton').title=t('mic');robotState('idle');status(error||(hadResult?t('ready'):t('micEmpty')));$('question').focus();};
+  try{rec.start();}catch(e){recognition=null;robotState('idle');status(t('micError'));}
+ }
+ $('launcher').onclick=()=>setOpen(true);$('minimize').onclick=()=>setOpen(false);$('settingsButton').onclick=()=>showSettings(!settingsOpen);$('backButton').onclick=()=>showSettings(false);$('form').onsubmit=e=>{e.preventDefault();send();};$('question').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();send();}};$('question').oninput=()=>{if(recognition)stopRecognition();};$('micButton').onclick=dictate;$('stopVoice').onclick=stopSpeech;
+ $('toggleVoice').onclick=()=>{const value=!pref('voice');setPref('voice',value);if(!value)stopSpeech();};$('voiceCheck').onchange=e=>{setPref('voice',e.target.checked);if(!e.target.checked)stopSpeech();};$('motionCheck').onchange=e=>setPref('motion',e.target.checked);$('sideSelect').onchange=e=>setPref('side',e.target.value);$('voiceSelect').onchange=e=>{stopSpeech();setPref('voices',{...pref('voices'),[lang]:e.target.value});};
+ $('clearButton').onclick=()=>{generation++;busy=false;stopAll();$('sendButton').disabled=false;$('micButton').disabled=false;mem.messages=mem.messages.filter(m=>!(m.caseId===(ctx?.caseId||null)&&!!m.exam===!!ctx?.exam));chatSuggestions=null;persist();renderMessages();renderSuggestions();$('settingsStatus').textContent=t('cleared');};
+ shadow.addEventListener('keydown',e=>{if(e.key==='Escape'&&opened){e.preventDefault();e.stopPropagation();if(settingsOpen)showSettings(false);else setOpen(false);}});
+ if(synth?.addEventListener)synth.addEventListener('voiceschanged',renderVoiceOptions);
+ // Render changes signal navigation/profile/exam transitions before the next paint.
+ const appObserver=new MutationObserver(()=>sync());const appNode=document.getElementById('app');if(appNode)appObserver.observe(appNode,{subtree:true,childList:true});
+ document.addEventListener('visibilitychange',()=>{if(document.hidden){stopAll();robot?.setMotion(false);}else{sync();robot?.setMotion(!!pref('motion'));}});
+ window.addEventListener('pagehide',()=>{stopAll();persist();});
+ const clock=setInterval(()=>{if(!document.hidden)sync();},650);
+ window.ArenaAssistantDemo={open:()=>setOpen(true),close:()=>setOpen(false),sync,version:'demo-local-1',destroy(){clearInterval(clock);appObserver.disconnect();stopAll();robot?.destroy();host.remove();delete window.ArenaAssistantDemo;}};
+ sync(true);
+})();
+
+</script>
+</body></html>
